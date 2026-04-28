@@ -24,6 +24,10 @@ the account is drawn down beyond the configured limit.
   breached.
 - **Kill switch** — `archangel flatten` (or `/flatten` in Telegram) closes
   every open position and cancels every working order.
+- **Dead-man's switch** — `archangel deadman` arms Binance's per-symbol
+  ``countdownCancelAll`` on a heartbeat. If Archangel crashes, the exchange
+  auto-cancels every working order after the countdown expires (existing
+  positions keep their own stop-losses).
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
 
@@ -63,6 +67,10 @@ archangel trade SOLUSDT long --entry 140 --stop 135
 
 archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
+
+archangel deadman                      # auto-track open positions, cancel-on-disconnect
+archangel deadman -s BTCUSDT,ETHUSDT   # static symbol list
+archangel deadman -c 120 -i 30         # countdown=120s, heartbeat every 30s
 
 archangel telegram                     # run the Telegram bot (foreground)
 ```
@@ -118,6 +126,8 @@ archangel/
 │   └── guards.py        # Pre-trade RiskGuard + DailyLossTracker
 ├── trading/
 │   └── service.py       # Plan → validate → execute orchestration
+├── safety/
+│   └── deadman.py       # Heartbeat-driven Binance countdownCancelAll switch
 ├── cli/main.py          # Typer CLI
 └── telegram/bot.py      # python-telegram-bot handlers
 ```
@@ -138,12 +148,14 @@ pytest -q
 The unit tests cover position sizing and the risk guard end-to-end with
 synthetic account snapshots — no Binance credentials required.
 
-## Roadmap (not in MVP)
+## Roadmap
 
-- Multi-exchange via CCXT
-- Strategy framework + backtesting
-- Persistent trade journal & daily PnL report
+- ~~Dead-man's switch (countdownCancelAll heartbeat)~~ ✓ shipped (`archangel deadman`)
+- Persistent trade journal & daily PnL report (via `get_income_history`)
+- Modify-order support for trailing stops
 - WebSocket push of fills/liquidations to Telegram
+- Strategy framework + backtesting
+- Multi-exchange via CCXT
 - Funding-rate / liquidation feed display
 
 ## Disclaimer

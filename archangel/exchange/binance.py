@@ -162,6 +162,19 @@ class BinanceFuturesClient:
                 return
             raise
 
+    async def set_countdown_cancel(self, symbol: str, countdown_ms: int) -> None:
+        """Arm Binance's dead-man's switch for ``symbol``.
+
+        Binance auto-cancels every open order on the symbol if no follow-up
+        ping arrives within ``countdown_ms`` milliseconds. Pass ``0`` to
+        disable an active timer.
+
+        Endpoint: ``POST /fapi/v1/countdownCancelAll``.
+        """
+        await self.client.futures_countdown_cancel_all(
+            symbol=symbol.upper(), countdownTime=int(countdown_ms)
+        )
+
     # ---- Orders -------------------------------------------------------
 
     @staticmethod
