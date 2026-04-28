@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
@@ -49,6 +50,53 @@ def _round_step(value: Decimal, step: Decimal) -> Decimal:
     if step <= 0:
         return value
     return (value / step).quantize(Decimal("1"), rounding=ROUND_DOWN) * step
+
+
+@dataclass(frozen=True)
+class TrailingStopPlan:
+    """Parameters of a planned native TRAILING_STOP_MARKET order."""
+
+    symbol: str
+    exit_side: str
+    quantity: Decimal
+    callback_rate: Decimal
+    activation_price: Decimal | None = None
+
+
+def plan_trailing_stop(
+    *,
+    symbol: str,
+    position_quantity: Decimal,
+    callback_rate: Decimal,
+    activation_price: Decimal | None = None,
+    quantity_override: Decimal | None = None,
+) -> TrailingStopPlan:
+    """Pure helper: validate inputs and resolve side/qty for a trailing stop.
+
+    Performs no I/O. Raises :class:`ValueError` for invalid callback rates,
+    a flat position, or a non-positive override quantity. Always returns a
+    reduce-only side that closes the open position direction.
+    """
+    if not (Decimal("0.1") <= callback_rate <= Decimal("5")):
+        raise ValueError(f"callback_rate must be between 0.1 and 5 percent (got {callback_rate})")
+    if position_quantity == 0:
+        raise ValueError(f"Cannot plan a trailing stop on flat {symbol}")
+
+    if quantity_override is not None:
+        if quantity_override <= 0:
+            raise ValueError(f"quantity_override must be > 0 (got {quantity_override})")
+        qty = abs(quantity_override)
+    else:
+        qty = abs(position_quantity)
+
+    exit_side = SIDE_SELL if position_quantity > 0 else SIDE_BUY
+    return TrailingStopPlan(
+        symbol=symbol.upper(),
+        exit_side=exit_side,
+        quantity=qty,
+        callback_rate=callback_rate,
+        activation_price=activation_price,
+    )
 
 
 class BinanceFuturesClient:
@@ -276,6 +324,93 @@ class BinanceFuturesClient:
             reduceOnly="true",
             newClientOrderId=self._make_client_order_id("arc-fl"),
         )
+
+    async def modify_limit_order(
+        self,
+        *,
+        symbol: str,
+        order_id: int,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> OrderResult:
+        """Modify a resting LIMIT order's price and/or quantity in place.
+
+        Endpoint: ``PUT /fapi/v1/order``. Only LIMIT orders can be modified;
+        STOP_MARKET / TAKE_PROFIT_MARKET cannot. Quantity and price are both
+        rounded to the symbol's filters before sending.
+        """
+        symbol = symbol.upper()
+        filters = await self.get_symbol_filters(symbol)
+        qty = _round_step(quantity, filters.qty_step)
+        if qty < filters.min_qty or qty <= 0:
+            raise ValueError(f"Quantity {quantity} is below min_qty={filters.min_qty} for {symbol}")
+        rounded_price = _round_step(price, filters.price_tick)
+        payload = await self.client.futures_modify_order(
+            symbol=symbol,
+            orderId=int(order_id),
+            side=side.upper(),
+            quantity=format(qty, "f"),
+            price=format(rounded_price, "f"),
+        )
+        return self._to_result(payload, fallback_symbol=symbol)
+
+    async def place_trailing_stop(
+        self,
+        *,
+        symbol: str,
+        callback_rate: Decimal,
+        activation_price: Decimal | None = None,
+        quantity: Decimal | None = None,
+    ) -> OrderResult:
+        """Place a native TRAILING_STOP_MARKET reduce-only on the open position.
+
+        Binance handles the trail server-side using ``callbackRate`` (0.1–5%).
+        ``activation_price`` is optional — if omitted, the trail starts as soon
+        as price moves favorably from the current mark.
+
+        If ``quantity`` is omitted, the current open position size on the
+        symbol is used. The trail is always reduce-only and side-flipped from
+        the position direction.
+        """
+        symbol = symbol.upper()
+        snapshot = await self.get_account_snapshot()
+        position = next(
+            (p for p in snapshot.positions if p.symbol == symbol and p.quantity != 0),
+            None,
+        )
+        if position is None:
+            raise ValueError(f"No open position on {symbol} to attach a trailing stop")
+
+        plan = plan_trailing_stop(
+            symbol=symbol,
+            position_quantity=position.quantity,
+            callback_rate=callback_rate,
+            activation_price=activation_price,
+            quantity_override=quantity,
+        )
+
+        filters = await self.get_symbol_filters(symbol)
+        qty = _round_step(plan.quantity, filters.qty_step)
+        if qty < filters.min_qty or qty <= 0:
+            raise ValueError(f"Quantity {qty} is below min_qty={filters.min_qty} for {symbol}")
+
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": plan.exit_side,
+            "type": "TRAILING_STOP_MARKET",
+            "quantity": format(qty, "f"),
+            "callbackRate": format(plan.callback_rate, "f"),
+            "reduceOnly": "true",
+            "workingType": "MARK_PRICE",
+            "newClientOrderId": self._make_client_order_id("arc-tr"),
+        }
+        if plan.activation_price is not None:
+            activation = _round_step(plan.activation_price, filters.price_tick)
+            kwargs["activationPrice"] = format(activation, "f")
+
+        payload = await self.client.futures_create_order(**kwargs)
+        return self._to_result(payload, fallback_symbol=symbol)
 
     async def close_position(self, symbol: str) -> OrderResult | None:
         """Close any open position on ``symbol`` with a reduce-only market order."""

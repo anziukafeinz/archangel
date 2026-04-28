@@ -1,6 +1,10 @@
 """Exchange adapters."""
 
-from archangel.exchange.binance import BinanceFuturesClient
+from archangel.exchange.binance import (
+    BinanceFuturesClient,
+    TrailingStopPlan,
+    plan_trailing_stop,
+)
 from archangel.exchange.models import (
     AccountSnapshot,
     BracketOrderRequest,
@@ -18,4 +22,6 @@ __all__ = [
     "OrderSide",
     "Position",
     "SymbolFilters",
+    "TrailingStopPlan",
+    "plan_trailing_stop",
 ]

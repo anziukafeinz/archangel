@@ -254,6 +254,76 @@ def risk() -> None:
     console.print(table)
 
 
+@app.command()
+def modify(
+    order_id: int = typer.Argument(..., help="Order ID to modify"),
+    symbol: str = typer.Option(..., "--symbol", "-s", help="Symbol the order belongs to"),
+    side: str = typer.Option(..., "--side", help="BUY or SELL"),
+    price: str = typer.Option(..., "--price", help="New limit price"),
+    qty: str = typer.Option(..., "--qty", "-q", help="New quantity"),
+) -> None:
+    """Modify a resting LIMIT order's price/qty in place (no cancel+replace)."""
+    service, client = _service()
+
+    async def _go() -> None:
+        try:
+            await client.connect()
+            result = await client.modify_limit_order(
+                symbol=symbol,
+                order_id=order_id,
+                side=side,
+                quantity=Decimal(qty),
+                price=Decimal(price),
+            )
+            console.print(
+                f"[green]Modified[/] order [cyan]{result.order_id}[/] on "
+                f"{result.symbol}: qty={result.quantity} price={result.price}"
+            )
+        finally:
+            await client.close()
+
+    _ = service  # keep the reference alive for client lifecycle
+    _run(_go())
+
+
+@app.command()
+def trail(
+    symbol: str = typer.Argument(..., help="Symbol with an open position"),
+    rate: str = typer.Option(..., "--rate", "-r", help="Callback rate in percent (0.1–5)"),
+    activate: str = typer.Option("", "--activate", "-a", help="Optional activation price"),
+    qty: str = typer.Option(
+        "",
+        "--qty",
+        "-q",
+        help="Override quantity (default: full open position size)",
+    ),
+) -> None:
+    """Attach a native TRAILING_STOP_MARKET reduce-only to an open position."""
+    service, client = _service()
+
+    async def _go() -> None:
+        try:
+            await client.connect()
+            result = await client.place_trailing_stop(
+                symbol=symbol,
+                callback_rate=Decimal(rate),
+                activation_price=Decimal(activate) if activate else None,
+                quantity=Decimal(qty) if qty else None,
+            )
+            console.print(
+                f"[green]Trailing stop placed[/] on {result.symbol} "
+                f"(order {result.order_id}, side={result.side}, qty={result.quantity})"
+            )
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+            raise typer.Exit(code=1) from e
+        finally:
+            await client.close()
+
+    _ = service
+    _run(_go())
+
+
 @app.command(name="telegram")
 def telegram_bot() -> None:
     """Run the Telegram control bot until interrupted."""
