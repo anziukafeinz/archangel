@@ -254,6 +254,95 @@ def risk() -> None:
     console.print(table)
 
 
+@app.command()
+def deadman(
+    symbols: str = typer.Option(
+        "",
+        "--symbols",
+        "-s",
+        help="Comma-separated symbols to protect (e.g. BTCUSDT,ETHUSDT). "
+        "Leave empty to auto-track symbols with open positions.",
+    ),
+    countdown: int = typer.Option(
+        60, "--countdown", "-c", help="Countdown in seconds before Binance cancels orders"
+    ),
+    interval: float = typer.Option(15.0, "--interval", "-i", help="Heartbeat interval in seconds"),
+) -> None:
+    """Run the dead-man's switch heartbeat.
+
+    Periodically arms Binance's ``countdownCancelAll`` per symbol. If
+    Archangel dies (network drop, process crash, host reboot), the exchange
+    auto-cancels every working order on the protected symbols after the
+    countdown expires. Existing positions keep their own stop-losses — this
+    only protects against orphaned resting orders.
+
+    Press Ctrl+C for a clean shutdown that disarms the timer.
+    """
+    from archangel.safety import (
+        DeadManSwitch,
+        open_position_symbols,
+        static_symbols,
+    )
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials.[/]")
+        raise typer.Exit(code=2)
+
+    countdown_ms = countdown * 1000
+    if interval * 1000 * 2 > countdown_ms:
+        console.print(
+            f"[yellow]Warning:[/] interval ({interval}s) is more than half the "
+            f"countdown ({countdown}s). Recommend interval <= countdown/2 so a "
+            f"single missed tick doesn't trigger the kill."
+        )
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    async def _go() -> None:
+        from archangel.exchange import BinanceFuturesClient
+
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            requested = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            resolver = static_symbols(requested) if requested else open_position_symbols(client)
+            switch = DeadManSwitch(
+                client,
+                countdown_ms=countdown_ms,
+                interval_s=interval,
+                resolve_symbols=resolver,
+            )
+
+            console.print(
+                f"[green]Dead-man's switch armed[/] "
+                f"(countdown={countdown}s, interval={interval}s, "
+                f"mode={'static: ' + ','.join(requested) if requested else 'auto-detect'})"
+            )
+
+            async def _on_tick(targets: list) -> None:
+                if targets:
+                    names = ", ".join(t.symbol for t in targets)
+                    console.print(f"[dim]heartbeat → {names}[/]")
+                else:
+                    console.print("[dim]heartbeat → (no symbols)[/]")
+
+            await switch.run(on_tick=_on_tick)
+        finally:
+            await client.close()
+
+    try:
+        _run(_go())
+    except KeyboardInterrupt:
+        console.print("[yellow]Stopped — dead-man timer disarmed.[/]")
+
+
 @app.command(name="telegram")
 def telegram_bot() -> None:
     """Run the Telegram control bot until interrupted."""
