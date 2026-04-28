@@ -25,6 +25,11 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Archangel — risk-first crypto futures trading on Binance USDT-M.",
 )
+liq_app = typer.Typer(
+    no_args_is_help=True,
+    help="Public liquidation feed (forceOrder stream).",
+)
+app.add_typer(liq_app, name="liq")
 console = Console()
 
 
@@ -252,6 +257,106 @@ def risk() -> None:
     table.add_row("Require stop-loss", "yes" if s.require_stop_loss else "no")
     table.add_row("Network", "testnet" if s.binance_testnet else "MAINNET (real money)")
     console.print(table)
+
+
+@liq_app.command("watch")
+def liq_watch(
+    symbols: str | None = typer.Option(
+        None,
+        "--symbols",
+        "-s",
+        help="Comma-separated symbols to watch (default: all USDT perpetuals)",
+    ),
+    min_usd: float = typer.Option(
+        0.0,
+        "--min-usd",
+        "-m",
+        help="Only surface liquidations ≥ this USD notional",
+    ),
+    telegram: bool = typer.Option(
+        True,
+        "--telegram/--no-telegram",
+        help="Also push events to Telegram (requires TELEGRAM_* env vars)",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Suppress console output (Telegram only)"
+    ),
+    top: int = typer.Option(
+        10,
+        "--top",
+        help="Keep a running leaderboard of the biggest N liquidations",
+    ),
+) -> None:
+    """Watch the public forceOrder stream and print/push every liquidation."""
+    from archangel.notify import TelegramNotifier
+    from archangel.streams import (
+        LiquidationEvent,
+        LiquidationStream,
+        format_liquidation,
+    )
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials. See .env.example.[/]")
+        raise typer.Exit(code=2)
+
+    symbol_list: list[str] | None = None
+    if symbols:
+        symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+
+    notifier: TelegramNotifier | None = None
+    if telegram and settings.telegram_bot_token and settings.telegram_chat_id:
+        notifier = TelegramNotifier(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+        )
+    elif telegram:
+        console.print("[yellow]TELEGRAM_* env vars missing; running in console-only mode.[/]")
+
+    threshold = Decimal(str(min_usd))
+    leaderboard: list[LiquidationEvent] = []
+
+    async def _handler(event: LiquidationEvent) -> None:
+        if event.notional_usd < threshold:
+            return
+        line = format_liquidation(event)
+        if not quiet:
+            console.print(line)
+        if top > 0:
+            leaderboard.append(event)
+            leaderboard.sort(key=lambda e: e.notional_usd, reverse=True)
+            del leaderboard[top:]
+        if notifier is not None:
+            await notifier.send(line)
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            stream = LiquidationStream(client, symbols=symbol_list)
+            await stream.run(_handler)
+        finally:
+            if notifier is not None:
+                await notifier.close()
+            await client.close()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    target = ",".join(symbol_list) if symbol_list else "ALL USDT perpetuals"
+    console.print(f"[cyan]Watching liquidations: {target}[/] (min ${threshold})")
+    try:
+        _run(_go())
+    except KeyboardInterrupt:
+        if leaderboard:
+            console.print("\n[bold]Session leaderboard[/]")
+            for ev in leaderboard:
+                console.print(format_liquidation(ev))
 
 
 @app.command(name="telegram")
