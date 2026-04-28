@@ -24,6 +24,10 @@ the account is drawn down beyond the configured limit.
   breached.
 - **Kill switch** — `archangel flatten` (or `/flatten` in Telegram) closes
   every open position and cancels every working order.
+- **Persistent journal** — `archangel journal sync` mirrors Binance's
+  income history into a local SQLite file (idempotent on `tranId`).
+  `journal daily` and `journal summary` aggregate realized PnL, funding,
+  and commissions per day or per symbol with Decimal precision.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
 
@@ -63,6 +67,11 @@ archangel trade SOLUSDT long --entry 140 --stop 135
 
 archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
+
+archangel journal sync                 # pull income history → ~/.archangel/journal.db
+archangel journal daily                # daily realized PnL, funding, fees
+archangel journal summary              # global PnL + win rate
+archangel journal summary -s BTCUSDT   # per-symbol summary
 
 archangel telegram                     # run the Telegram bot (foreground)
 ```
@@ -118,6 +127,10 @@ archangel/
 │   └── guards.py        # Pre-trade RiskGuard + DailyLossTracker
 ├── trading/
 │   └── service.py       # Plan → validate → execute orchestration
+├── journal/
+│   ├── store.py         # SQLite schema + DAL for income history
+│   ├── sync.py          # Incremental Binance income → store
+│   └── reports.py       # Daily PnL & per-symbol aggregations
 ├── cli/main.py          # Typer CLI
 └── telegram/bot.py      # python-telegram-bot handlers
 ```
@@ -138,12 +151,13 @@ pytest -q
 The unit tests cover position sizing and the risk guard end-to-end with
 synthetic account snapshots — no Binance credentials required.
 
-## Roadmap (not in MVP)
+## Roadmap
 
-- Multi-exchange via CCXT
-- Strategy framework + backtesting
-- Persistent trade journal & daily PnL report
+- ~~Persistent trade journal & daily PnL report~~ ✓ shipped (`archangel journal`)
+- Modify-order support for trailing stops
 - WebSocket push of fills/liquidations to Telegram
+- Strategy framework + backtesting
+- Multi-exchange via CCXT
 - Funding-rate / liquidation feed display
 
 ## Disclaimer

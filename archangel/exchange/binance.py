@@ -153,6 +153,32 @@ class BinanceFuturesClient:
             positions=positions,
         )
 
+    async def get_income_history(
+        self,
+        *,
+        symbol: str | None = None,
+        income_type: str | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Fetch raw income rows.
+
+        Endpoint: ``GET /fapi/v1/income``. Returns rows like
+        ``{tranId, symbol, incomeType, income, asset, info, time, tradeId}``.
+        """
+        params: dict[str, object] = {"limit": min(max(limit, 1), 1000)}
+        if symbol:
+            params["symbol"] = symbol.upper()
+        if income_type:
+            params["incomeType"] = income_type
+        if start_ms is not None:
+            params["startTime"] = int(start_ms)
+        if end_ms is not None:
+            params["endTime"] = int(end_ms)
+        result = await self.client.futures_income_history(**params)
+        return list(result) if result else []
+
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         try:
             await self.client.futures_change_leverage(symbol=symbol.upper(), leverage=leverage)
