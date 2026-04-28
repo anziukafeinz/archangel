@@ -124,6 +124,59 @@ class BinanceFuturesClient:
         data = await self.client.futures_mark_price(symbol=symbol.upper())
         return _d(data["markPrice"])
 
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 1500,
+    ) -> list[list]:
+        """Fetch raw historical klines, transparently paginated.
+
+        Binance caps each call at 1500 rows. When ``start_ms`` is provided we
+        advance the cursor to the last row's close-time + 1ms and keep going
+        until a short page comes back or we pass ``end_ms``. Without
+        ``start_ms`` we just return the most recent ``limit`` rows.
+
+        Each row is the raw 12-element list Binance returns; consumers parse
+        it into :class:`archangel.strategy.base.Bar`.
+        """
+        page_limit = min(max(limit, 1), 1500)
+        params: dict[str, object] = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "limit": page_limit,
+        }
+        if start_ms is None:
+            if end_ms is not None:
+                params["endTime"] = int(end_ms)
+            rows = await self.client.futures_klines(**params)
+            return list(rows) if rows else []
+
+        out: list[list] = []
+        cursor = int(start_ms)
+        while True:
+            page_params = dict(params)
+            page_params["startTime"] = cursor
+            if end_ms is not None:
+                page_params["endTime"] = int(end_ms)
+            page = await self.client.futures_klines(**page_params)
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < page_limit:
+                break
+            last_close_ms = int(page[-1][6])
+            next_cursor = last_close_ms + 1
+            if next_cursor <= cursor:
+                break  # safety: avoid infinite loop on stuck pagination
+            cursor = next_cursor
+            if end_ms is not None and cursor > end_ms:
+                break
+        return out
+
     # ---- Account ------------------------------------------------------
 
     async def get_account_snapshot(self) -> AccountSnapshot:
