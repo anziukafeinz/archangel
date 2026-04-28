@@ -25,6 +25,11 @@ app = typer.Typer(
     no_args_is_help=True,
     help="Archangel — risk-first crypto futures trading on Binance USDT-M.",
 )
+strategy_app = typer.Typer(
+    no_args_is_help=True,
+    help="Strategy framework (list, inspect built-in strategies).",
+)
+app.add_typer(strategy_app, name="strategy")
 console = Console()
 
 
@@ -252,6 +257,274 @@ def risk() -> None:
     table.add_row("Require stop-loss", "yes" if s.require_stop_loss else "no")
     table.add_row("Network", "testnet" if s.binance_testnet else "MAINNET (real money)")
     console.print(table)
+
+
+@strategy_app.command("list")
+def strategy_list() -> None:
+    """List built-in strategies."""
+    from archangel.strategy import STRATEGIES
+
+    table = Table(title="Built-in strategies")
+    table.add_column("Name")
+    table.add_column("Class")
+    table.add_column("Docstring", overflow="fold")
+    for name, factory in sorted(STRATEGIES.items()):
+        doc = (factory.__doc__ or "").strip().split("\n")[0]
+        table.add_row(name, factory.__name__, doc)
+    console.print(table)
+
+
+@app.command()
+def backtest(
+    symbol: str = typer.Argument(..., help="Symbol, e.g. BTCUSDT"),
+    strategy: str = typer.Argument(..., help="Strategy name (see `archangel strategy list`)"),
+    interval: str = typer.Option("1h", "--tf", "-t", help="Kline interval (1m..1d)"),
+    days: int = typer.Option(30, "--days", "-d", help="Lookback window in days"),
+    initial_equity: float = typer.Option(10000.0, "--equity", help="Starting equity USDT"),
+    risk_pct: float = typer.Option(1.0, "--risk", help="Risk % per trade"),
+    fee_bps: float = typer.Option(4.0, "--fee", help="Taker fee in basis points"),
+    slippage_bps: float = typer.Option(2.0, "--slippage", help="Slippage in basis points"),
+) -> None:
+    """Backtest a strategy against recent Binance history."""
+    from archangel.backtest import Backtester
+    from archangel.strategy import get_strategy, parse_kline_row
+
+    try:
+        strat = get_strategy(strategy)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from exc
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials. See .env.example.[/]")
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        import time
+
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        await client.connect()
+        try:
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - days * 24 * 60 * 60 * 1000
+            console.print(f"[cyan]Fetching {symbol.upper()} {interval} klines for last {days}d…[/]")
+            rows = await client.get_klines(
+                symbol, interval, start_ms=start_ms, end_ms=end_ms, limit=1500
+            )
+            console.print(f"Loaded {len(rows)} bars")
+            bars = [parse_kline_row(r) for r in rows]
+        finally:
+            await client.close()
+
+        bt = Backtester(
+            initial_equity=Decimal(str(initial_equity)),
+            risk_per_trade_pct=Decimal(str(risk_pct)),
+            fee_bps=Decimal(str(fee_bps)),
+            slippage_bps=Decimal(str(slippage_bps)),
+        )
+        result = bt.run(strat, bars, symbol=symbol.upper())
+        _print_backtest(result)
+
+    _run(_go())
+
+
+def _print_backtest(result) -> None:
+    m = result.metrics
+    header = Table(title=f"Backtest · {result.symbol} · {result.strategy}", show_header=False)
+    header.add_row("Initial equity", f"{result.initial_equity:.2f}")
+    header.add_row("Final equity", f"{result.final_equity:.2f}")
+    color = "green" if m.total_return_pct >= 0 else "red"
+    header.add_row("Total return", f"[{color}]{m.total_return_pct:+.2f}%[/]")
+    header.add_row("Max drawdown", f"{m.max_drawdown_pct:.2f}%")
+    header.add_row("Trades", f"{m.trade_count} ({m.win_count}W / {m.loss_count}L)")
+    header.add_row("Win rate", f"{m.win_rate:.2f}%")
+    header.add_row("Profit factor", f"{m.profit_factor}")
+    header.add_row("Expectancy/trade", f"{m.expectancy:.2f}")
+    header.add_row("Sharpe", f"{m.sharpe:.2f}")
+    header.add_row("Sortino", f"{m.sortino:.2f}")
+    console.print(header)
+
+    if result.trades:
+        t = Table(title="Trades (last 20)")
+        t.add_column("Side")
+        t.add_column("Entry", justify="right")
+        t.add_column("Exit", justify="right")
+        t.add_column("Qty", justify="right")
+        t.add_column("PnL", justify="right")
+        t.add_column("Reason")
+        for tr in result.trades[-20:]:
+            pnl_color = "green" if tr.pnl >= 0 else "red"
+            t.add_row(
+                tr.side,
+                f"{tr.entry_price}",
+                f"{tr.exit_price}",
+                f"{tr.quantity}",
+                f"[{pnl_color}]{tr.pnl:+.2f}[/]",
+                tr.reason_out,
+            )
+        console.print(t)
+
+
+@app.command()
+def paper(
+    symbol: str = typer.Argument(..., help="Symbol, e.g. BTCUSDT"),
+    strategy: str = typer.Argument(..., help="Strategy name (see `archangel strategy list`)"),
+    interval: str = typer.Option("1h", "--tf", "-t", help="Kline interval (1m..1d)"),
+    initial_equity: float = typer.Option(10000.0, "--equity", help="Starting equity USDT"),
+    risk_pct: float = typer.Option(1.0, "--risk", help="Risk % per trade"),
+    telegram: bool = typer.Option(
+        False, "--telegram/--no-telegram", help="Push fills to Telegram (optional)"
+    ),
+) -> None:
+    """Run a strategy against live bars without touching the exchange."""
+    from archangel.backtest.paper import PaperTrader
+    from archangel.strategy import get_strategy
+
+    try:
+        strat = get_strategy(strategy)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from exc
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials. See .env.example.[/]")
+        raise typer.Exit(code=2)
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    def _on_trade(trade, equity) -> None:
+        pnl_color = "green" if trade.pnl >= 0 else "red"
+        console.print(
+            f"[{pnl_color}]{trade.side} closed[/] entry={trade.entry_price} "
+            f"exit={trade.exit_price} qty={trade.quantity} "
+            f"pnl={trade.pnl:+.2f} equity={equity:.2f} ({trade.reason_out})"
+        )
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        await client.connect()
+        try:
+            trader = PaperTrader(
+                client,
+                symbol=symbol,
+                interval=interval,
+                strategy=strat,
+                initial_equity=Decimal(str(initial_equity)),
+                risk_per_trade_pct=Decimal(str(risk_pct)),
+                on_trade=_on_trade,
+            )
+            console.print(
+                f"[cyan]Paper trading {symbol.upper()} {interval} strategy={strategy}[/] "
+                f"(telegram={telegram})"
+            )
+            try:
+                await trader.run()
+            except KeyboardInterrupt:
+                summary = trader.summary()
+                _print_backtest(summary)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+@app.command()
+def live(
+    symbol: str = typer.Argument(..., help="Symbol, e.g. BTCUSDT"),
+    strategy: str = typer.Argument(..., help="Strategy name"),
+    interval: str = typer.Option("1h", "--tf", "-t", help="Kline interval"),
+    go_live: bool = typer.Option(
+        False,
+        "--live/--dry-run",
+        help="Actually place bracket orders. DEFAULT is --dry-run (log only).",
+    ),
+    max_trades: int | None = typer.Option(
+        None, "--max-trades", "-n", help="Stop after N position opens"
+    ),
+    auto_stop_hours: float | None = typer.Option(
+        None, "--stop-after", "-H", help="Stop after this many hours"
+    ),
+) -> None:
+    """Run a strategy against live bars and route signals through the risk guard."""
+    from archangel.strategy import get_strategy
+    from archangel.trading import LiveStrategyRunner
+
+    try:
+        strat = get_strategy(strategy)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from exc
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    async def _go() -> None:
+        service, client = _service()
+        await client.connect()
+        try:
+            runner = LiveStrategyRunner(
+                service=service,
+                strategy=strat,
+                symbol=symbol,
+                interval=interval,
+                dry_run=not go_live,
+                max_trades=max_trades,
+                auto_stop_after_seconds=None if auto_stop_hours is None else auto_stop_hours * 3600,
+            )
+            mode = "[red]LIVE[/]" if go_live else "[yellow]DRY-RUN[/]"
+            console.print(
+                f"Live runner {mode} {symbol.upper()} {interval} strategy={strategy} "
+                f"max_trades={max_trades} stop_after={auto_stop_hours}h"
+            )
+            if go_live:
+                console.print("[bold red]Real orders will be placed.[/] Ctrl+C to stop + flatten.")
+            try:
+                await runner.run()
+            except KeyboardInterrupt:
+                await runner.shutdown(flatten=go_live)
+            _print_runner_summary(runner)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+def _print_runner_summary(runner) -> None:
+    state = runner.state
+    t = Table(title="Live runner summary", show_header=False)
+    t.add_row("Stopped", "yes" if state.stopped else "no")
+    t.add_row("Stop reason", state.stop_reason or "—")
+    t.add_row("Opened", str(state.trades_opened))
+    t.add_row("Closed", str(state.trades_closed))
+    t.add_row("Position", state.position_side or "—")
+    console.print(t)
+    if state.events:
+        et = Table(title="Last 20 decisions")
+        et.add_column("Action")
+        et.add_column("Decision")
+        et.add_column("Bar close", justify="right")
+        et.add_column("Reason", overflow="fold")
+        for ev in state.events[-20:]:
+            et.add_row(
+                ev.signal.action.value,
+                ev.decision,
+                f"{ev.bar.close}",
+                ev.reason,
+            )
+        console.print(et)
 
 
 @app.command(name="telegram")

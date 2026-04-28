@@ -26,6 +26,17 @@ the account is drawn down beyond the configured limit.
   every open position and cancels every working order.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
+- **Strategy framework & backtester** — pure-Decimal indicator library
+  (EMA/SMA/RSI/ATR), a pluggable `Strategy` base class with two built-in
+  examples (`ema_cross`, `rsi_reversion`), and a bar-by-bar backtester with
+  realistic fills (next-bar open, intra-bar SL/TP, fees + slippage in bps).
+- **Paper trading** — `archangel paper` runs the same strategy against live
+  Binance klines without hitting the exchange, so a passing backtest
+  translates into a meaningful dry-run.
+- **Live strategy execution** — `archangel live` bridges a `Strategy` straight
+  into the bracket-order + `RiskGuard` pipeline. The same strategy code that
+  passes a backtest can place real orders, with dry-run as the default, a
+  `--max-trades` safety cap, and an `--stop-after` wall-clock timer.
 
 ## Install
 
@@ -65,6 +76,17 @@ archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
 
 archangel telegram                     # run the Telegram bot (foreground)
+
+# Strategy framework & backtesting
+archangel strategy list                          # built-in strategies
+archangel backtest BTCUSDT ema_cross --tf 1h --days 30
+archangel backtest ETHUSDT rsi_reversion --tf 15m --days 14 --risk 0.5
+archangel paper BTCUSDT ema_cross --tf 1h        # live paper trading
+
+# Live strategy → RiskGuard → bracket order (dry-run by default)
+archangel live BTCUSDT ema_cross --tf 1h                              # log only
+archangel live BTCUSDT ema_cross --tf 1h --live --max-trades 3        # real orders, cap
+archangel live ETHUSDT rsi_reversion --tf 15m --live --stop-after 12  # auto-stop in 12h
 ```
 
 Every `trade` command prints a plan first and asks for confirmation
@@ -117,7 +139,18 @@ archangel/
 │   ├── sizing.py        # Position-size-from-risk math
 │   └── guards.py        # Pre-trade RiskGuard + DailyLossTracker
 ├── trading/
-│   └── service.py       # Plan → validate → execute orchestration
+│   ├── service.py       # Plan → validate → execute orchestration
+│   └── live_strategy.py # Strategy → RiskGuard → bracket-order bridge
+├── strategy/
+│   ├── base.py          # Bar, Signal, Strategy ABC + parse_kline_row
+│   ├── indicators.py    # EMA, SMA, RSI, ATR (pure Decimal)
+│   ├── ema_cross.py     # Built-in EMA crossover strategy
+│   ├── rsi_reversion.py # Built-in RSI mean-reversion strategy
+│   └── registry.py      # Name → factory lookup
+├── backtest/
+│   ├── engine.py        # Bar-by-bar backtester
+│   ├── metrics.py       # Sharpe/Sortino/PF/expectancy/MDD/win-rate
+│   └── paper.py         # Live paper trader (same execution model)
 ├── cli/main.py          # Typer CLI
 └── telegram/bot.py      # python-telegram-bot handlers
 ```
@@ -141,7 +174,7 @@ synthetic account snapshots — no Binance credentials required.
 ## Roadmap (not in MVP)
 
 - Multi-exchange via CCXT
-- Strategy framework + backtesting
+- ~~Strategy framework + backtesting~~ — shipped via `archangel backtest` / `paper`
 - Persistent trade journal & daily PnL report
 - WebSocket push of fills/liquidations to Telegram
 - Funding-rate / liquidation feed display
