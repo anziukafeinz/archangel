@@ -265,5 +265,121 @@ def telegram_bot() -> None:
     run_bot()
 
 
+# ---- journal sub-app ---------------------------------------------------
+
+journal_app = typer.Typer(
+    no_args_is_help=True,
+    help="Persistent trade journal (Binance income history → SQLite).",
+)
+app.add_typer(journal_app, name="journal")
+
+
+def _open_store(db_path: str | None):
+    from archangel.journal import JournalStore
+
+    return JournalStore(db_path) if db_path else JournalStore()
+
+
+@journal_app.command("sync")
+def journal_sync(
+    db: str = typer.Option("", "--db", help="SQLite path (default ~/.archangel/journal.db)"),
+    days: int = typer.Option(
+        0, "--days", help="Force re-pull last N days (default: incremental from latest)"
+    ),
+) -> None:
+    """Pull income history from Binance into the local journal store."""
+    import time as _time
+
+    from archangel.journal import sync_incomes
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials.[/]")
+        raise typer.Exit(code=2)
+
+    store = _open_store(db or None)
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            start_ms: int | None = None
+            if days > 0:
+                start_ms = int(_time.time() * 1000) - days * 86_400_000
+            inserted = await sync_incomes(client, store, start_ms=start_ms)
+            console.print(
+                f"[green]Sync complete[/]: {inserted} new rows. Total in store: {store.count()}."
+            )
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+@journal_app.command("daily")
+def journal_daily(
+    days: int = typer.Option(30, "--days", help="Show last N days"),
+    db: str = typer.Option("", "--db"),
+) -> None:
+    """Show daily realized PnL, funding, and commission."""
+    from archangel.journal import daily_pnl
+
+    store = _open_store(db or None)
+    rows = store.all_rows()
+    days_data = daily_pnl(rows)
+    if days > 0:
+        days_data = days_data[-days:]
+    if not days_data:
+        console.print("[yellow]No journal data. Run 'archangel journal sync' first.[/]")
+        return
+
+    table = Table(title=f"Daily PnL (last {len(days_data)} days, UTC)")
+    table.add_column("Day", style="cyan")
+    table.add_column("Realized", justify="right")
+    table.add_column("Funding", justify="right")
+    table.add_column("Commission", justify="right")
+    table.add_column("Net", justify="right", style="bold")
+
+    for d in days_data:
+        net_str = f"{d.net:+.4f}"
+        net_style = "green" if d.net > 0 else "red" if d.net < 0 else ""
+        table.add_row(
+            d.day.isoformat(),
+            f"{d.realized:+.4f}",
+            f"{d.funding:+.4f}",
+            f"{d.commission:+.4f}",
+            f"[{net_style}]{net_str}[/]" if net_style else net_str,
+        )
+    console.print(table)
+
+
+@journal_app.command("summary")
+def journal_summary(
+    symbol: str = typer.Option("", "--symbol", "-s", help="Filter by symbol"),
+    db: str = typer.Option("", "--db"),
+) -> None:
+    """Show aggregate PnL, win rate, and fee/funding totals."""
+    from archangel.journal import summary_for_symbol, total_summary
+
+    store = _open_store(db or None)
+    summary = summary_for_symbol(store, symbol) if symbol else total_summary(store)
+
+    table = Table(title=f"Summary: {summary.symbol}", show_header=False)
+    table.add_row("Trades (decided)", str(summary.win_count + summary.loss_count))
+    table.add_row("Wins", str(summary.win_count))
+    table.add_row("Losses", str(summary.loss_count))
+    table.add_row("Win rate", f"{summary.win_rate}%")
+    table.add_row("Realized PnL", f"{summary.realized:+.4f}")
+    table.add_row("Funding", f"{summary.funding:+.4f}")
+    table.add_row("Commission", f"{summary.commission:+.4f}")
+    net_color = "green" if summary.net > 0 else "red" if summary.net < 0 else "white"
+    table.add_row("[bold]Net[/]", f"[{net_color}]{summary.net:+.4f}[/]")
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()
