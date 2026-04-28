@@ -265,5 +265,210 @@ def telegram_bot() -> None:
     run_bot()
 
 
+# ---- funding sub-app ---------------------------------------------------
+
+funding_app = typer.Typer(
+    no_args_is_help=True,
+    help="Funding rate display and signal scanning for USDT-M perpetuals.",
+)
+app.add_typer(funding_app, name="funding")
+
+
+def _format_countdown(target_ms: int) -> str:
+    import time as _time
+
+    delta_s = max(0, int(target_ms / 1000 - _time.time()))
+    h, rem = divmod(delta_s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+@funding_app.command("now")
+def funding_now(
+    symbols: list[str] = typer.Argument(
+        None, help="Symbols to display (default: all USDT perpetuals)"
+    ),
+    top: int = typer.Option(20, "--top", "-n", help="Show only the top N by |rate|"),
+) -> None:
+    """Show the current funding rate for one or more symbols."""
+    from archangel.funding import parse_premium_index
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials.[/]")
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            payloads = await client.get_premium_index()
+            quotes = parse_premium_index(payloads)
+            if symbols:
+                wanted = {s.upper() for s in symbols}
+                quotes = [q for q in quotes if q.symbol in wanted]
+            quotes.sort(key=lambda q: abs(q.last_funding_rate), reverse=True)
+            quotes = quotes[:top] if top > 0 else quotes
+
+            table = Table(title=f"Funding rates ({len(quotes)} symbols)")
+            table.add_column("Symbol", style="cyan")
+            table.add_column("Mark", justify="right")
+            table.add_column("Rate (8h)", justify="right")
+            table.add_column("APR %", justify="right")
+            table.add_column("Next pay", justify="right")
+            for q in quotes:
+                rate_pct = q.last_funding_rate * Decimal("100")
+                rate_color = (
+                    "green" if q.last_funding_rate > 0 else "red" if q.last_funding_rate < 0 else ""
+                )
+                rate_str = f"{rate_pct:+.4f}%"
+                table.add_row(
+                    q.symbol,
+                    f"{q.mark_price:,.4f}",
+                    f"[{rate_color}]{rate_str}[/]" if rate_color else rate_str,
+                    f"{q.annualized_yield_pct:+.2f}%",
+                    _format_countdown(q.next_funding_time_ms),
+                )
+            console.print(table)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+@funding_app.command("history")
+def funding_history(
+    symbol: str = typer.Argument(..., help="Symbol to inspect"),
+    limit: int = typer.Option(30, "--limit", "-n", help="Most recent N rates"),
+) -> None:
+    """Historical funding rates for a single symbol."""
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials.[/]")
+        raise typer.Exit(code=2)
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            rows = await client.get_funding_rate_history(symbol, limit=limit)
+            if not rows:
+                console.print("[yellow]No history.[/]")
+                return
+            table = Table(title=f"Funding history: {symbol.upper()}")
+            table.add_column("Time (UTC)", style="cyan")
+            table.add_column("Rate (8h)", justify="right")
+            table.add_column("APR %", justify="right")
+            from datetime import UTC
+            from datetime import datetime as _dt
+
+            from archangel.funding import annualized_yield_pct
+
+            for row in rows[-limit:]:
+                rate = Decimal(str(row.get("fundingRate", "0")))
+                ts = _dt.fromtimestamp(int(row.get("fundingTime", 0)) / 1000, tz=UTC)
+                rate_color = "green" if rate > 0 else "red" if rate < 0 else ""
+                rate_str = f"{rate * 100:+.4f}%"
+                table.add_row(
+                    ts.strftime("%Y-%m-%d %H:%M"),
+                    f"[{rate_color}]{rate_str}[/]" if rate_color else rate_str,
+                    f"{annualized_yield_pct(rate):+.2f}%",
+                )
+            console.print(table)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+@funding_app.command("signals")
+def funding_signals(
+    threshold: float = typer.Option(
+        0.05,
+        "--threshold",
+        "-t",
+        help="|Rate| threshold in percent per 8h (default 0.05% ≈ ~55% APR)",
+    ),
+    track_flips: bool = typer.Option(
+        False,
+        "--flips/--no-flips",
+        help="Also scan for sign flips (one extra request per symbol)",
+    ),
+) -> None:
+    """Scan all perpetuals for extreme funding rates and sign flips."""
+    from archangel.funding import classify_signals, parse_premium_index
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print("[red]Missing Binance credentials.[/]")
+        raise typer.Exit(code=2)
+
+    threshold_dec = Decimal(str(threshold)) / Decimal("100")
+
+    async def _go() -> None:
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+        try:
+            await client.connect()
+            payloads = await client.get_premium_index()
+            quotes = parse_premium_index(payloads)
+
+            history: dict[str, list[Decimal]] = {}
+            if track_flips:
+                # Pull last rate for the candidates only (extreme-rate symbols)
+                candidates = [q for q in quotes if abs(q.last_funding_rate) >= threshold_dec]
+                for q in candidates:
+                    rows = await client.get_funding_rate_history(q.symbol, limit=2)
+                    if len(rows) >= 2:
+                        history[q.symbol] = [Decimal(str(rows[-2].get("fundingRate", "0")))]
+
+            signals = classify_signals(
+                quotes,
+                extreme_threshold=threshold_dec,
+                history_by_symbol=history,
+            )
+
+            if not signals:
+                console.print(f"[green]No signals above {threshold}%/8h.[/]")
+                return
+
+            table = Table(title=f"Funding signals (threshold ≥ {threshold}%/8h)")
+            table.add_column("Symbol", style="cyan")
+            table.add_column("Kind")
+            table.add_column("Rate (8h)", justify="right")
+            table.add_column("APR %", justify="right")
+            table.add_column("Note", style="dim")
+            for sig in signals:
+                rate_str = f"{sig.last_funding_rate * 100:+.4f}%"
+                kind_color = {
+                    "EXTREME_POSITIVE": "green",
+                    "EXTREME_NEGATIVE": "red",
+                    "SIGN_FLIP": "yellow",
+                }.get(sig.kind.value, "white")
+                table.add_row(
+                    sig.symbol,
+                    f"[{kind_color}]{sig.kind.value}[/]",
+                    rate_str,
+                    f"{sig.annualized_yield_pct:+.2f}%",
+                    sig.note,
+                )
+            console.print(table)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
 if __name__ == "__main__":
     app()

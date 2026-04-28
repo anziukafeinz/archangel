@@ -24,6 +24,10 @@ the account is drawn down beyond the configured limit.
   breached.
 - **Kill switch** — `archangel flatten` (or `/flatten` in Telegram) closes
   every open position and cancels every working order.
+- **Funding rate intel** — `archangel funding now` shows live rates with
+  next-payment countdown, `funding history` lists the last N settlements
+  for a symbol, and `funding signals` surfaces extreme rates / sign flips
+  across every perpetual to spot mean-reversion or arbitrage candidates.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
 
@@ -63,6 +67,12 @@ archangel trade SOLUSDT long --entry 140 --stop 135
 
 archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
+
+archangel funding now                  # top-N funding rates with countdown
+archangel funding now BTCUSDT ETHUSDT  # filter by symbol(s)
+archangel funding history BTCUSDT      # last 30 settlements (8h each)
+archangel funding signals -t 0.05      # scan for extreme rates
+archangel funding signals --flips      # also flag sign flips
 
 archangel telegram                     # run the Telegram bot (foreground)
 ```
@@ -138,13 +148,13 @@ pytest -q
 The unit tests cover position sizing and the risk guard end-to-end with
 synthetic account snapshots — no Binance credentials required.
 
-## Roadmap (not in MVP)
+## Roadmap
 
+- ~~Funding-rate / liquidation feed display~~ ✓ shipped (`archangel funding`)
 - Multi-exchange via CCXT
 - Strategy framework + backtesting
 - Persistent trade journal & daily PnL report
 - WebSocket push of fills/liquidations to Telegram
-- Funding-rate / liquidation feed display
 
 ## Disclaimer
 

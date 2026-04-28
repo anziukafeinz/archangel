@@ -153,6 +153,45 @@ class BinanceFuturesClient:
             positions=positions,
         )
 
+    async def get_funding_rate_history(
+        self,
+        symbol: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Historical funding rates for a single symbol.
+
+        Endpoint: ``GET /fapi/v1/fundingRate``. Each row is paid every 8 hours.
+        """
+        params: dict[str, object] = {
+            "symbol": symbol.upper(),
+            "limit": min(max(limit, 1), 1000),
+        }
+        if start_ms is not None:
+            params["startTime"] = int(start_ms)
+        if end_ms is not None:
+            params["endTime"] = int(end_ms)
+        result = await self.client.futures_funding_rate(**params)
+        return list(result) if result else []
+
+    async def get_premium_index(self, symbol: str | None = None) -> list[dict]:
+        """Mark price + current funding info.
+
+        Endpoint: ``GET /fapi/v1/premiumIndex``. With no symbol, returns
+        every perpetual; with a symbol, returns a single-element list.
+        """
+        if symbol:
+            result = await self.client.futures_mark_price(symbol=symbol.upper())
+        else:
+            result = await self.client.futures_mark_price()
+        if isinstance(result, list):
+            return list(result)
+        if isinstance(result, dict):
+            return [result]
+        return []
+
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         try:
             await self.client.futures_change_leverage(symbol=symbol.upper(), leverage=leverage)
