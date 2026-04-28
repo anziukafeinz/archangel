@@ -440,6 +440,93 @@ def paper(
     _run(_go())
 
 
+@app.command()
+def live(
+    symbol: str = typer.Argument(..., help="Symbol, e.g. BTCUSDT"),
+    strategy: str = typer.Argument(..., help="Strategy name"),
+    interval: str = typer.Option("1h", "--tf", "-t", help="Kline interval"),
+    go_live: bool = typer.Option(
+        False,
+        "--live/--dry-run",
+        help="Actually place bracket orders. DEFAULT is --dry-run (log only).",
+    ),
+    max_trades: int | None = typer.Option(
+        None, "--max-trades", "-n", help="Stop after N position opens"
+    ),
+    auto_stop_hours: float | None = typer.Option(
+        None, "--stop-after", "-H", help="Stop after this many hours"
+    ),
+) -> None:
+    """Run a strategy against live bars and route signals through the risk guard."""
+    from archangel.strategy import get_strategy
+    from archangel.trading import LiveStrategyRunner
+
+    try:
+        strat = get_strategy(strategy)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=2) from exc
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    async def _go() -> None:
+        service, client = _service()
+        await client.connect()
+        try:
+            runner = LiveStrategyRunner(
+                service=service,
+                strategy=strat,
+                symbol=symbol,
+                interval=interval,
+                dry_run=not go_live,
+                max_trades=max_trades,
+                auto_stop_after_seconds=None if auto_stop_hours is None else auto_stop_hours * 3600,
+            )
+            mode = "[red]LIVE[/]" if go_live else "[yellow]DRY-RUN[/]"
+            console.print(
+                f"Live runner {mode} {symbol.upper()} {interval} strategy={strategy} "
+                f"max_trades={max_trades} stop_after={auto_stop_hours}h"
+            )
+            if go_live:
+                console.print("[bold red]Real orders will be placed.[/] Ctrl+C to stop + flatten.")
+            try:
+                await runner.run()
+            except KeyboardInterrupt:
+                await runner.shutdown(flatten=go_live)
+            _print_runner_summary(runner)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
+def _print_runner_summary(runner) -> None:
+    state = runner.state
+    t = Table(title="Live runner summary", show_header=False)
+    t.add_row("Stopped", "yes" if state.stopped else "no")
+    t.add_row("Stop reason", state.stop_reason or "—")
+    t.add_row("Opened", str(state.trades_opened))
+    t.add_row("Closed", str(state.trades_closed))
+    t.add_row("Position", state.position_side or "—")
+    console.print(t)
+    if state.events:
+        et = Table(title="Last 20 decisions")
+        et.add_column("Action")
+        et.add_column("Decision")
+        et.add_column("Bar close", justify="right")
+        et.add_column("Reason", overflow="fold")
+        for ev in state.events[-20:]:
+            et.add_row(
+                ev.signal.action.value,
+                ev.decision,
+                f"{ev.bar.close}",
+                ev.reason,
+            )
+        console.print(et)
+
+
 @app.command(name="telegram")
 def telegram_bot() -> None:
     """Run the Telegram control bot until interrupted."""
