@@ -26,6 +26,9 @@ the account is drawn down beyond the configured limit.
   every open position and cancels every working order.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
+- **Liquidation feed** — `archangel liq watch` tails Binance's public
+  `forceOrder` WebSocket and prints (and optionally Telegrams) every forced
+  liquidation with direction, size, price and USD notional.
 
 ## Install
 
@@ -65,6 +68,13 @@ archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
 
 archangel telegram                     # run the Telegram bot (foreground)
+
+# Public liquidation feed (forceOrder WebSocket, no credentials needed for data)
+archangel liq watch                            # all USDT perpetuals
+archangel liq watch -s BTCUSDT,ETHUSDT         # filter by symbol
+archangel liq watch -m 100000                  # only ≥ $100k notional
+archangel liq watch --no-telegram              # console only
+archangel liq watch -q --top 20                # Telegram + running leaderboard
 ```
 
 Every `trade` command prints a plan first and asks for confirmation
@@ -118,6 +128,10 @@ archangel/
 │   └── guards.py        # Pre-trade RiskGuard + DailyLossTracker
 ├── trading/
 │   └── service.py       # Plan → validate → execute orchestration
+├── streams/
+│   └── liquidations.py  # Public forceOrder WebSocket consumer + parser
+├── notify/
+│   └── telegram.py      # Standalone one-way Telegram notifier (httpx)
 ├── cli/main.py          # Typer CLI
 └── telegram/bot.py      # python-telegram-bot handlers
 ```
@@ -144,7 +158,8 @@ synthetic account snapshots — no Binance credentials required.
 - Strategy framework + backtesting
 - Persistent trade journal & daily PnL report
 - WebSocket push of fills/liquidations to Telegram
-- Funding-rate / liquidation feed display
+- Funding-rate display & signal scanner
+- ~~Liquidation feed~~ — shipped via `archangel liq watch`
 
 ## Disclaimer
 
