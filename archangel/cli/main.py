@@ -265,5 +265,76 @@ def telegram_bot() -> None:
     run_bot()
 
 
+@app.command()
+def watch(
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Suppress console output (Telegram only)"
+    ),
+    no_telegram: bool = typer.Option(
+        False, "--no-telegram", help="Disable Telegram push (console only)"
+    ),
+) -> None:
+    """Stream user-data events (fills, account updates, margin calls).
+
+    Connects to the Binance Futures user-data WebSocket and pushes a
+    human-readable summary of every fill / cancel / margin call to the
+    configured Telegram chat (and to stdout). Reconnects automatically on
+    network errors. Press Ctrl+C to stop.
+    """
+    from archangel.notify import TelegramNotifier
+    from archangel.streams import UserDataStream, make_handler
+
+    settings = get_settings()
+    if not settings.has_credentials:
+        console.print(
+            "[red]Missing Binance credentials.[/] Copy .env.example to .env and fill "
+            "BINANCE_API_KEY / BINANCE_API_SECRET."
+        )
+        raise typer.Exit(code=2)
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    async def _go() -> None:
+        from archangel.exchange import BinanceFuturesClient
+
+        client = BinanceFuturesClient(
+            api_key=settings.binance_api_key,
+            api_secret=settings.binance_api_secret,
+            testnet=settings.binance_testnet,
+        )
+
+        notifier: TelegramNotifier | None = None
+        if not no_telegram and settings.has_telegram:
+            notifier = TelegramNotifier(
+                bot_token=settings.telegram_bot_token,
+                chat_id=settings.telegram_chat_id,
+            )
+        elif not no_telegram:
+            console.print("[yellow]Telegram not configured; running in console-only mode.[/]")
+
+        console_print = (lambda text: console.print(text)) if not quiet else None
+
+        try:
+            await client.connect()
+            handler = make_handler(notifier=notifier, console=console_print)
+            stream = UserDataStream(client)
+            console.print(
+                f"[green]Watching user-data stream[/] "
+                f"(testnet={settings.binance_testnet}, telegram={'on' if notifier else 'off'})"
+            )
+            await stream.run(handler)
+        finally:
+            if notifier is not None:
+                await notifier.close()
+            await client.close()
+
+    try:
+        _run(_go())
+    except KeyboardInterrupt:
+        console.print("[yellow]Stopped.[/]")
+
+
 if __name__ == "__main__":
     app()
