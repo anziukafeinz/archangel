@@ -26,6 +26,10 @@ the account is drawn down beyond the configured limit.
   every open position and cancels every working order.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
+- **Real-time push** — `archangel watch` subscribes to Binance's futures
+  user-data WebSocket and pushes a human-readable summary of every fill,
+  cancel and margin call to the configured Telegram chat. Auto-reconnects
+  on network errors.
 
 ## Install
 
@@ -65,6 +69,9 @@ archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
 
 archangel telegram                     # run the Telegram bot (foreground)
+archangel watch                        # stream fills/margin-calls to console + Telegram
+archangel watch --quiet                # Telegram only (no console echo)
+archangel watch --no-telegram          # console only
 ```
 
 Every `trade` command prints a plan first and asks for confirmation
@@ -118,6 +125,11 @@ archangel/
 │   └── guards.py        # Pre-trade RiskGuard + DailyLossTracker
 ├── trading/
 │   └── service.py       # Plan → validate → execute orchestration
+├── streams/
+│   ├── user_data.py     # WebSocket user-data stream + typed events
+│   └── watcher.py       # Event → Telegram message formatting
+├── notify/
+│   └── telegram.py      # Standalone async Telegram notifier (no polling)
 ├── cli/main.py          # Typer CLI
 └── telegram/bot.py      # python-telegram-bot handlers
 ```
@@ -138,12 +150,14 @@ pytest -q
 The unit tests cover position sizing and the risk guard end-to-end with
 synthetic account snapshots — no Binance credentials required.
 
-## Roadmap (not in MVP)
+## Roadmap
 
-- Multi-exchange via CCXT
+- ~~WebSocket push of fills/liquidations to Telegram~~ ✓ shipped (`archangel watch`)
+- Persistent trade journal & daily PnL report (via `get_income_history`)
+- Modify-order support for trailing stops
+- Dead-man's switch (`auto-cancel-all-open-orders` countdown)
 - Strategy framework + backtesting
-- Persistent trade journal & daily PnL report
-- WebSocket push of fills/liquidations to Telegram
+- Multi-exchange via CCXT
 - Funding-rate / liquidation feed display
 
 ## Disclaimer
