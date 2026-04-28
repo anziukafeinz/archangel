@@ -24,6 +24,10 @@ the account is drawn down beyond the configured limit.
   breached.
 - **Kill switch** — `archangel flatten` (or `/flatten` in Telegram) closes
   every open position and cancels every working order.
+- **Modify-in-place + trailing stop** — `archangel modify` edits a resting
+  LIMIT order's price/qty without cancel+replace; `archangel trail` attaches
+  a native exchange-managed `TRAILING_STOP_MARKET` (reduce-only) to an open
+  position. Side is auto-flipped from the position direction.
 - **Two surfaces** — a `typer`-based CLI for desk use and a `python-telegram-bot`
   bot for mobile control.
 
@@ -63,6 +67,10 @@ archangel trade SOLUSDT long --entry 140 --stop 135
 
 archangel close BTCUSDT                # close one symbol
 archangel flatten                      # kill switch
+
+archangel modify 12345 -s BTCUSDT --side BUY --price 64500 --qty 0.5
+archangel trail BTCUSDT -r 1.0         # 1% native trailing stop on the whole position
+archangel trail ETHUSDT -r 0.8 -a 3500 # trail activates at 3500
 
 archangel telegram                     # run the Telegram bot (foreground)
 ```
@@ -138,8 +146,9 @@ pytest -q
 The unit tests cover position sizing and the risk guard end-to-end with
 synthetic account snapshots — no Binance credentials required.
 
-## Roadmap (not in MVP)
+## Roadmap
 
+- ~~Modify-order support for trailing stops~~ ✓ shipped (`archangel modify` / `archangel trail`)
 - Multi-exchange via CCXT
 - Strategy framework + backtesting
 - Persistent trade journal & daily PnL report
